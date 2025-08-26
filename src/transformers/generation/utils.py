@@ -119,6 +119,8 @@ logger = logging.get_logger(__name__)
 if is_accelerate_available():
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
+import time
+# PRINT_COUNT=0
 
 # Variable names used to hold the cache at generation time
 ALL_CACHE_NAMES = [
@@ -2353,6 +2355,7 @@ class GenerationMixin(ContinuousMixin):
             assistant_model,
             streamer,
         )
+        self.token_latency = kwargs.pop("token_latency", None)
 
         generation_config, model_kwargs = self._prepare_generation_config(
             generation_config, use_model_defaults, **kwargs
@@ -2705,6 +2708,7 @@ class GenerationMixin(ContinuousMixin):
             `model.config.is_encoder_decoder=True`.
         """
         # init values
+        latency_list = []
         pad_token_id = generation_config._pad_token_tensor
         output_attentions = generation_config.output_attentions
         output_hidden_states = generation_config.output_hidden_states
@@ -2756,12 +2760,44 @@ class GenerationMixin(ContinuousMixin):
             is_prefill = True
 
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+            tic = time.time()
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # prepare variable output controls (note: some models won't accept all output controls)
             model_inputs.update({"output_attentions": output_attentions} if output_attentions else {})
             model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
+            
+            # global PRINT_COUNT
+            # PRINT_COUNT += 1
+            # from torch.profiler import profile, ProfilerActivity
+            # schedule = torch.profiler.schedule(wait=0, warmup=0, active=1)
+            # PROFILE_DIR = os.environ.get("PROFILE_DIR", "/tmp/profile")
+            
+            # start_time = time.time()
+            # with profile(
+            #     activities=[ProfilerActivity.CPU, ProfilerActivity.XPU],
+            #     record_shapes=True,
+            #     with_stack=False,
+            #     with_flops=True,
+            #     schedule=schedule,
+            # ) as prof:
+            #     if is_prefill:
+            #         outputs = self(**model_inputs, return_dict=True)
+            #         is_prefill = False
+            #     else:
+            #         outputs = model_forward(**model_inputs, return_dict=True)
+            
+            # end_time = time.time()
+            # print(f"[Timer] Elapsed time: {end_time - start_time:.6f} seconds")
+            
+            # print(f"\n==== Token {PRINT_COUNT} ====")
+            # print(prof.key_averages().table(sort_by="xpu_time_total", row_limit=20))
+            # token_file_path = os.path.join(PROFILE_DIR, f"token_{PRINT_COUNT}_profile.txt")
+            # with open(token_file_path, "w") as f:
+            #     # Save to file without row limit and with extended column width
+            #     f.write(prof.key_averages(group_by_input_shape=True).table(sort_by="xpu_time_total", row_limit=-1, max_name_column_width=300, max_shapes_column_width=300))
+            # print(f"Token {PRINT_COUNT} profiling results saved to: {token_file_path}")
 
             if is_prefill:
                 outputs = self(**model_inputs, return_dict=True)
@@ -2829,13 +2865,16 @@ class GenerationMixin(ContinuousMixin):
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
+            if self.token_latency:
+                torch.xpu.synchronize()
+            latency_list.append(time.time() - tic)
 
         if streamer is not None:
             streamer.end()
 
         if return_dict_in_generate:
             if self.config.is_encoder_decoder:
-                return GenerateEncoderDecoderOutput(
+                output_result = GenerateEncoderDecoderOutput(
                     sequences=input_ids,
                     scores=scores,
                     logits=raw_logits,
@@ -2847,7 +2886,7 @@ class GenerationMixin(ContinuousMixin):
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
             else:
-                return GenerateDecoderOnlyOutput(
+                output_result = GenerateDecoderOnlyOutput(
                     sequences=input_ids,
                     scores=scores,
                     logits=raw_logits,
@@ -2856,7 +2895,12 @@ class GenerationMixin(ContinuousMixin):
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return input_ids
+            output_result = input_ids
+            
+        if self.token_latency is not None:
+            return (output_result, latency_list)
+        else:
+            return output_result
 
     @staticmethod
     def _flatten_beam_dim(tensor: torch.Tensor) -> torch.Tensor:
@@ -3137,6 +3181,7 @@ class GenerationMixin(ContinuousMixin):
         """
 
         # 1. init beam_search values
+        latency_list = []
         pad_token_id = generation_config._pad_token_tensor
         eos_token_id = generation_config._eos_token_tensor
         output_attentions = generation_config.output_attentions
@@ -3239,6 +3284,7 @@ class GenerationMixin(ContinuousMixin):
 
         # 4. run the generation loop
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+            tic = time.time()
             # a. Forward current tokens, obtain the logits
             flat_running_sequences = self._flatten_beam_dim(running_sequences[:, :, :cur_len])
             model_inputs = self.prepare_inputs_for_generation(flat_running_sequences, **model_kwargs)
@@ -3292,6 +3338,9 @@ class GenerationMixin(ContinuousMixin):
             # This is needed to properly delete logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del model_outputs
+            if self.token_latency:
+                torch.xpu.synchronize()
+            latency_list.append(time.time() - tic)
 
             log_probs = self._unflatten_beam_dim(log_probs, batch_size, num_beams)
             log_probs = log_probs + running_beam_scores[:, :, None]
@@ -3400,7 +3449,7 @@ class GenerationMixin(ContinuousMixin):
                 beam_scores = None
 
             if self.config.is_encoder_decoder:
-                return GenerateBeamEncoderDecoderOutput(
+                output_result = GenerateBeamEncoderDecoderOutput(
                     sequences=sequences,
                     sequences_scores=beam_scores,
                     scores=all_scores,
@@ -3414,7 +3463,7 @@ class GenerationMixin(ContinuousMixin):
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
             else:
-                return GenerateBeamDecoderOnlyOutput(
+                output_result = GenerateBeamDecoderOnlyOutput(
                     sequences=sequences,
                     sequences_scores=beam_scores,
                     scores=all_scores,
@@ -3425,7 +3474,12 @@ class GenerationMixin(ContinuousMixin):
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return sequences
+            output_result = sequences
+
+        if self.token_latency is not None:
+            return (output_result, latency_list)
+        else:
+            return output_result
 
     def _assisted_decoding(
         self,
