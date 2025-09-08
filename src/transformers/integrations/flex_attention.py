@@ -292,6 +292,12 @@ def flex_attention_forward(
     kernel_options = kwargs.get("kernel_options")
     # On CPU we must skip returning LSE due to a runtime issue; elsewhere, follow PyTorch API and return it
     return_lse = query.device.type != "cpu"
+    
+    if query.device.type == "xpu":
+        # On XPU, TMA is not always beneficial. Disable it by default unless explicitly enabled by user.
+        if kernel_options is None:
+            kernel_options = {}
+        kernel_options["USE_TMA"] = True
 
     flex_attention_output = compile_friendly_flex_attention(
         query,
