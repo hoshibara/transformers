@@ -26,10 +26,6 @@ def sdpa_attention_forward(
     is_causal: Optional[bool] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
-    if hasattr(module, "num_key_value_groups"):
-        key = repeat_kv(key, module.num_key_value_groups)
-        value = repeat_kv(value, module.num_key_value_groups)
-
     causal_mask = attention_mask
     if attention_mask is not None and causal_mask.ndim == 4:
         causal_mask = causal_mask[:, :, :, : key.shape[-2]]
@@ -59,6 +55,7 @@ def sdpa_attention_forward(
         dropout_p=dropout,
         scale=scaling,
         is_causal=is_causal,
+        enable_gqa=True
     )
     attn_output = attn_output.transpose(1, 2).contiguous()
 

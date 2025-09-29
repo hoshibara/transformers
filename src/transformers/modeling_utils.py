@@ -5799,6 +5799,16 @@ def caching_allocator_warmup(model: PreTrainedModel, expanded_device_map: Dict, 
             device_memory = torch.cuda.mem_get_info(index)[0]
             # Allow up to 95% of max device memory
             byte_count = min(byte_count, int(0.95 * device_memory))
+        if device.type == "xpu":
+            # Known error from https://github.com/pytorch/pytorch/issues/157989
+            # BMG will fail on torch.xpu.mem_get_info() on 2025.1. Needs to upgrade to 2025.2 to fix this.
+            if os.environ.get("UR_L0_ENABLE_SYSMAN_ENV_DEFAULT") is not None and os.environ["UR_L0_ENABLE_SYSMAN_ENV_DEFAULT"] == "0":
+                index = device.index if device.index is not None else torch.xpu.current_device()
+                device_memory = torch.xpu.mem_get_info(index)[0]
+            else:
+                # 11.5GB
+                device_memory = 11.5 * 1024**3
+            byte_count = min(byte_count, int(0.95 * device_memory))
         # Allocate memory
         _ = torch.empty(byte_count // factor, dtype=torch.float16, device=device, requires_grad=False)
 
