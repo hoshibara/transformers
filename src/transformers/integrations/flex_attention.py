@@ -290,6 +290,13 @@ def flex_attention_forward(
         enable_gqa = False
 
     kernel_options = kwargs.get("kernel_options")
+
+    if query.device.type == "xpu":
+        # On XPU, TMA is not always beneficial. Disable it by default unless explicitly enabled by user.
+        if kernel_options is None:
+            kernel_options = {}
+        kernel_options["USE_TMA"] = True
+
     attn_output, attention_weights = compile_friendly_flex_attention(
         query,
         key,
