@@ -30,6 +30,7 @@ from typing import Optional, Union
 
 import torch
 from packaging import version
+import os
 
 from ..utils import is_torch_flex_attn_available, logging
 from ..utils.import_utils import _torch_version, is_torch_less_or_equal, is_torchdynamo_compiling
@@ -76,7 +77,15 @@ class WrappedFlexAttention:
                 )
             # Fallback, usually the most recent torch 2.7.x+ versions
             else:
-                self._compiled_flex_attention = torch.compile(flex_attention)
+                FA_MAX_AUTOTUNE = os.environ.get("FA_MAX_AUTOTUNE", "0").lower() in ("1", "true", "yes")
+                if FA_MAX_AUTOTUNE:
+                    print(f'[DEBUG] run MAX_AUTOTUNE path')
+                    self._compiled_flex_attention = torch.compile(
+                        flex_attention, mode="max-autotune-no-cudagraphs"
+                    )
+                else:
+                    print(f'[DEBUG] disable MAX_AUTOTUNE path')
+                    self._compiled_flex_attention = torch.compile(flex_attention)
 
             self._is_flex_compiled = True
 
@@ -294,6 +303,12 @@ def flex_attention_forward(
         raise ValueError(
             "Attention sinks cannot be run on CPU with flex attention. Please switch to a different device, e.g. CUDA"
         )
+        
+    if query.device.type == "xpu":
+        # On XPU, TMA is not always beneficial. Disable it by default unless explicitly enabled by user.
+        if kernel_options is None:
+            kernel_options = {}
+        kernel_options["USE_TMA"] = True
 
     flex_attention_output = compile_friendly_flex_attention(
         query,
